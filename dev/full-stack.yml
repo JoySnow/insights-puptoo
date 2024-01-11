@@ -1,7 +1,7 @@
 # This docker-compose file will stand up the entire stack including ingress and inventory.
 # The steps for buidling those images are out of scope, but this will reference them if they exist.
 # This docker compose file will stand up the minimal components necessary for
-# Puptoo to work. Nothing is stood up for uploads or to consume the inventory 
+# Puptoo to work. Nothing is stood up for uploads or to consume the inventory
 # messages.
 version: "3"
 services:
@@ -21,6 +21,23 @@ services:
       - KAFKA_BROKER_ID=1
       - KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1
       - KAFKA_ZOOKEEPER_CONNECT=zookeeper:32181
+  init-kafka:
+    image: confluentinc/cp-kafka
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # blocks until kafka is reachable
+      kafka-topics --bootstrap-server kafka:29092 --list
+
+      echo -e 'Creating kafka topics'
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic platform.upload.advisor --replication-factor 1 --partitions 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic platform.upload.announce --replication-factor 1 --partitions 1
+
+      echo -e 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server kafka:29092 --list
+      "
   puptoo:
     image: quay.io/cloudservices/insights-puptoo:latest
     ports:
@@ -29,6 +46,7 @@ services:
       - LOG_LEVEL=DEBUG
     depends_on:
       - kafka
+      - init-kafka
       - minio
   minio:
       image: minio/minio
@@ -41,6 +59,8 @@ services:
       environment:
         - MINIO_ACCESS_KEY=$MINIO_ACCESS_KEY
         - MINIO_SECRET_KEY=$MINIO_SECRET_KEY
+        - MINIO_ROOT_USER=$MINIO_ACCESS_KEY
+        - MINIO_ROOT_PASSWORD=$MINIO_SECRET_KEY
   createbuckets:
     image: minio/mc
     depends_on:
@@ -48,12 +68,12 @@ services:
     entrypoint: >
       /bin/sh -c "
       /usr/bin/mc config host add myminio http://minio:9000 $MINIO_ACCESS_KEY $MINIO_SECRET_KEY;
-      /usr/bin/mc mb myminio/insights-upload-perma;
-      /usr/bin/mc mb myminio/insights-upload-rejected;
-      /usr/bin/mc mb myminio/insights-upload-puptoo;
-      /usr/bin/mc policy download myminio/insights-upload-perma;
-      /usr/bin/mc policy download myminio/insights-upload-rejected;
-      /usr/bin/mc policy download myminio/insights-upload-puptoo;
+      /usr/bin/mc mb --ignore-existing myminio/insights-upload-perma;
+      /usr/bin/mc mb --ignore-existing myminio/insights-upload-rejected;
+      /usr/bin/mc mb --ignore-existing myminio/insights-upload-puptoo;
+      /usr/bin/mc anonymous set public myminio/insights-upload-perma;
+      /usr/bin/mc anonymous set public myminio/insights-upload-rejected;
+      /usr/bin/mc anonymous set public myminio/insights-upload-puptoo;
       exit 0;
       "
   ingress:
@@ -68,6 +88,7 @@ services:
       - INGRESS_REJECTBUCKET=insights-upload-rejected
       - INGRESS_INVENTORYURL=http://inventory:8080/api/inventory/v1/hosts
       - INGRESS_VALIDTOPICS=testareno,advisor #if you test a different topic, add it here
+      - INGRESS_VALID_UPLOAD_TYPES=advisor,compliance,qpc,resource-optimization,malware-detection # this is the right arg name
       - OPENSHIFT_BUILD_COMMIT=woopwoop
       - INGRESS_MINIODEV=true
       - INGRESS_MINIOACCESSKEY=$MINIO_ACCESS_KEY
@@ -90,8 +111,8 @@ services:
     environment:
       - INVENTORY_DB_HOST=db
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-    links:
-      - db
+    # links:
+    #   - db
     depends_on:
       - db
       - kafka
@@ -103,8 +124,8 @@ services:
     environment:
       - INVENTORY_DB_HOST=db
       - KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-    links:
-      - db
+    # links:
+    #   - db
     depends_on:
       - db
       - kafka
@@ -115,3 +136,22 @@ services:
     container_name: puptoo-redis
     ports:
       - 6379:6379
+
+# Note:
+# minio:
+#   ...
+#       /usr/bin/mc config host add myminio http://minio:9000 $MINIO_ACCESS_KEY $MINIO_SECRET_KEY;
+#       /usr/bin/mc mb --ignore-existing myminio/insights-upload-perma;    # <-- --ignore-existing : do nothing if the bucket exist.
+#       /usr/bin/mc anonymous set public myminio/insights-upload-perma;    # <-- public : Enable both download and upload access
+
+
+# - INGRESS_VALID_UPLOAD_TYPES=advisor,compliance,hccm,qpc,rhv,tower,leapp-reporting,xavier,mkt,playbook,playbook-sat,resource-optimization,malware-detection,pinakes,assisted-installer,runtimes-java-general,openshift,tasks,automation-hub,aap-billing-controller
+
+
+
+
+
+# dev-puptoo-1         | MainThread INFO insights-puptoo - Using ANNOUNCE_TOPIC: platform.upload.announce
+# dev-puptoo-1         | MainThread INFO insights-puptoo - Using INVENTORY_TOPIC: platform.inventory.host-ingress
+# dev-puptoo-1         | MainThread INFO insights-puptoo - Using VALIDATION_TOPIC: platform.upload.validation
+# dev-puptoo-1         | MainThread INFO insights-puptoo - Using TRACKER_TOPIC: platform.payload-status
