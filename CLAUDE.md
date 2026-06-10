@@ -70,6 +70,26 @@ poetry run flake8 ./tests/
 
 **Note**: The `INSIGHTS_FILTERS_ENABLED=false` environment variable is required for tests to run correctly.
 
+### Testing System Profile Fields (Pattern)
+
+Nearly all system profile tests follow this insights-core pattern:
+
+```python
+from insights.specs import Specs
+from insights.tests import InputData, run_test
+from src.puptoo.process.profile import system_profile
+
+def test_cpuinfo():
+    input_data = InputData().add(Specs.cpuinfo, MOCK_DATA)
+    result = run_test(system_profile, input_data)
+    assert result["cpu_model"] == "Intel(R) Xeon(R) CPU E5-2690 0 @ 2.90GHz"
+```
+
+- `Specs.<name>` maps to the parser spec, `InputData().add()` provides mock file content
+- `run_test()` runs the full `@rule(optional=[...])` — unavailable parsers become `None` and are skipped gracefully
+- The return dict is the `system_profile` output (not wrapped)
+- See existing tests in `tests/test_*.py` for reference
+
 ### Testing with Unreleased insights-core Changes
 
 The puptoo tests depend on the insights-core library (typically at `~/Work/insights-core/`). To test with unreleased changes:
@@ -116,18 +136,6 @@ poetry run insights-run -p src.puptoo ~/path/to/archive
 poetry run insights-run -p src.puptoo -f json /path/to/archive.tar.gz
 ```
 
-### Running Locally
-
-```bash
-# Create virtualenv and install
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install .
-
-# Run the service (requires Kafka)
-puptoo
-```
-
 ### Docker Compose
 
 ```bash
@@ -141,8 +149,18 @@ cd dev && source .env && docker-compose -f full-stack.yml up
 ### Linting
 
 ```bash
-flake8
+poetry run flake8 ./src/
+poetry run flake8 ./tests/
 ```
+
+### Full CI Test Run (Includes Schema Validation)
+
+The CI pipeline (`.github/workflows/integrate.yaml`) runs `unit_test.sh`:
+1. Pytest unit tests with JUnit XML output
+2. Runs `insights-run -p src.puptoo` against each test archive in `dev/test-archives/`
+3. Validates JSON output against `insights-host-inventory/swagger/system_profile.spec.yaml`
+
+For faster local iteration, the `unit_test_poetry_local.sh` script runs the same checks inside the dev container.
 
 ### Hermetic Build Maintenance
 
@@ -187,9 +205,14 @@ See `.hermetic_builds/README.md` for detailed instructions.
 
 - `src/puptoo/process/profile.py` contains the core extraction logic:
   - Uses insights-core's rule system with `@rule()` decorator
-  - `system_profile` rule gathers ~50+ system profile fields from various parsers
+  - `system_profile` rule gathers ~55 system profile fields from ~60+ optional parser dependencies
   - Parsers read archive files (e.g., `/sys/class/dmi/id/`, `/etc/os-release`, `rpm -qa`)
   - Returns structured facts including `metadata` (canonical facts) and `system_profile`
+- `src/puptoo/process/profile.py` has three key layers:
+  - **`system_profile()` rule**: `@rule(optional=[...])` with ~60 parsers; each checks if the parser is available and extracts fields
+  - **`get_system_profile(path)`**: Loads insights-core specs and runs both `canonical_facts` + `system_profile` rules
+  - **`postprocess(facts)`**: Refines the result — moves fields between dicts, strips `None`/`""`/`[]`/`{}` values via `_remove_empties()`
+  - **`BYPASS_PROFILE_SANS_NONE_FACTS`**: Set of fields exempt from empty-value stripping (e.g., `dnf_modules`). **New facts with potentially empty values must be added here.**
 
 ### Configuration
 
